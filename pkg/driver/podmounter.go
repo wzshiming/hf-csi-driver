@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +38,14 @@ const (
 	podReadyPoll       = time.Second
 	mountReadyPollPM   = 500 * time.Millisecond
 	podDeletionTimeout = 60 * time.Second
+
+	mountContainerName = "hf-mount"
+	// podLogHintTimeout bounds the log fetch that decorates a mount failure;
+	// the hint is best-effort and must not stretch the failing RPC.
+	podLogHintTimeout = 3 * time.Second
+	// podLogHintMaxLen keeps the hint well inside the 1024 bytes kubelet
+	// keeps of an event message, after the paths that precede it.
+	podLogHintMaxLen = 300
 )
 
 // DefaultMountReadyTimeout is the default for --mount-ready-timeout. It is
@@ -891,7 +900,11 @@ func (m *PodMounter) Mount(sourceType, sourceID, target string, opts MountOption
 		} else {
 			cleanupPod = true
 		}
-		return fmt.Errorf("FUSE mount did not appear at %s: %w", mountPath, err)
+		// The wait error only says that the mount is missing. Why it is
+		// missing (Hub unreachable from the mount pod's network, bad token,
+		// panic at startup) is only in the mount pod's log, so carry its
+		// last line into the error kubelet turns into the FailedMount event.
+		return fmt.Errorf("FUSE mount did not appear at %s: %w%s", mountPath, err, m.mountPodLogHint(ctx, podName))
 	}
 
 	if err := stackBind(mountPath, target); err != nil {
@@ -1348,6 +1361,50 @@ func (m *PodMounter) waitForMount(path, podName string, absDeadline time.Time) e
 		case <-ticker.C:
 		}
 	}
+}
+
+// mountPodLogHint returns "; mount pod <name> last log: <line>" for the mount
+// pod's most recent log line, or "" when there is none or it cannot be read
+// (e.g. a chart older than the pods/log grant). A crashed container's line is
+// read from its previous instance when the current one has logged nothing yet.
+func (m *PodMounter) mountPodLogHint(ctx context.Context, podName string) string {
+	ctx, cancel := context.WithTimeout(ctx, podLogHintTimeout)
+	defer cancel()
+
+	for _, previous := range []bool{false, true} {
+		raw, err := m.client.CoreV1().Pods(m.namespace).GetLogs(podName, &corev1.PodLogOptions{
+			Container: mountContainerName,
+			Previous:  previous,
+			TailLines: ptr.To(int64(5)),
+		}).DoRaw(ctx)
+		if err != nil {
+			klog.V(4).Infof("Cannot read logs of mount pod %s (previous=%v): %v", podName, previous, err)
+			continue
+		}
+		if line := lastLogLine(string(raw), podLogHintMaxLen); line != "" {
+			return fmt.Sprintf("; mount pod %s last log: %s", podName, line)
+		}
+	}
+	return ""
+}
+
+var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
+
+// lastLogLine returns the last non-blank line of raw without terminal color
+// codes, cut to at most maxLen bytes.
+func lastLogLine(raw string, maxLen int) string {
+	lines := strings.Split(raw, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(ansiEscape.ReplaceAllString(lines[i], ""))
+		if line == "" {
+			continue
+		}
+		if len(line) > maxLen {
+			line = strings.ToValidUTF8(line[:maxLen], "") + "..."
+		}
+		return line
+	}
+	return ""
 }
 
 func (m *PodMounter) waitForPodDeletion(ctx context.Context, name string) error {

@@ -1,10 +1,12 @@
 package driver
 
 import (
+	"context"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 func TestIsPodTerminal(t *testing.T) {
@@ -331,5 +333,38 @@ func TestPodStaleConditions(t *testing.T) {
 				t.Errorf("isPodTerminal() = %v, want %v", got, tt.wantTerminal)
 			}
 		})
+	}
+}
+
+func TestLastLogLine(t *testing.T) {
+	tests := []struct {
+		name   string
+		raw    string
+		maxLen int
+		want   string
+	}{
+		{"empty", "", 100, ""},
+		{"blank lines only", "\n  \n\n", 100, ""},
+		{"last non-blank line", "first\nsecond\n\n", 100, "second"},
+		{"strips color codes", "a\n\x1b[33m WARN\x1b[0m hub unreachable\n", 100, "WARN hub unreachable"},
+		{"truncates", "0123456789", 4, "0123..."},
+		{"truncation keeps valid UTF-8", "abé", 3, "ab..."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := lastLogLine(tt.raw, tt.maxLen); got != tt.want {
+				t.Errorf("lastLogLine(%q, %d) = %q, want %q", tt.raw, tt.maxLen, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMountPodLogHint(t *testing.T) {
+	// The fake clientset answers every GetLogs with the body "fake logs".
+	m := &PodMounter{client: fake.NewSimpleClientset(), namespace: "ns"}
+	got := m.mountPodLogHint(context.Background(), "hf-mount-abc")
+	want := "; mount pod hf-mount-abc last log: fake logs"
+	if got != want {
+		t.Errorf("mountPodLogHint() = %q, want %q", got, want)
 	}
 }

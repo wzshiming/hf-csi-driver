@@ -9,7 +9,8 @@
 #   A  baseline: mountpod and sidecar both mount a public repo
 #   B  drop host-netns egress to :443 on the kind node (pod traffic is
 #      forwarded, not locally generated, so it is unaffected)
-#   C  mountpod: expect FailedMount "FUSE mount did not appear ..."
+#   C  mountpod: expect FailedMount "FUSE mount did not appear ..." that
+#      quotes the mount pod's last log line (the failed Hub request)
 #   D  sidecar: expect success under the same block
 #   E  hfMount.hostNetwork=false: expect mountpod to succeed under the block
 
@@ -103,7 +104,7 @@ probe_network() {
   kubectl delete pod nettest --ignore-not-found --wait=false >/dev/null
 }
 
-RESULT_C=unknown RESULT_D=unknown RESULT_E=unknown
+RESULT_C=unknown RESULT_D=unknown RESULT_E=unknown RESULT_HINT=unknown
 
 section "A. baseline (no block)"
 probe_network
@@ -149,8 +150,14 @@ dump_mount_pods
 echo "=== driver log (mount path) ==="
 kubectl logs -l app=hf-csi-node -c hf-csi-plugin --tail=400 \
   | grep -E 'mount pod|Mount pod|FUSE mount|did not|keeping it|cleaning up|Creating mount pod' | tail -40 || true
+RESULT_HINT="missing"
 if failed_mount_events repro-mountpod | grep -q 'FUSE mount did not appear'; then
   RESULT_C="reproduced: $(failed_mount_events repro-mountpod | grep -o 'FUSE mount did not appear.*' | head -1)"
+  # The event itself must name the cause: the mount pod's last log line,
+  # which under this block is a failed request to the Hub.
+  if failed_mount_events repro-mountpod | grep -q 'last log: .*huggingface\.co'; then
+    RESULT_HINT="event names the cause"
+  fi
 else
   RESULT_C="NOT reproduced (phase=$(kubectl get pod repro-mountpod -o jsonpath='{.status.phase}'))"
 fi
@@ -184,6 +191,7 @@ dump_mount_pods
 
 section "SUMMARY"
 echo "C mountpod, host network blocked : $RESULT_C"
+echo "C event carries mount pod log    : $RESULT_HINT"
 echo "D sidecar,  host network blocked : $RESULT_D"
 echo "E mountpod, hostNetwork=false    : $RESULT_E"
 {
@@ -191,10 +199,11 @@ echo "E mountpod, hostNetwork=false    : $RESULT_E"
   echo "| phase | result |"
   echo "|---|---|"
   echo "| C mountpod, host netns egress blocked | $RESULT_C |"
+  echo "| C event carries the mount pod's last log line | $RESULT_HINT |"
   echo "| D sidecar, same block | $RESULT_D |"
   echo "| E mountpod, hfMount.hostNetwork=false, same block | $RESULT_E |"
 } >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
 
-[[ $RESULT_C == reproduced* && $RESULT_D == "mounted OK" && $RESULT_E == "mounted OK" ]] \
-  || fail "hypothesis not confirmed (see summary)"
-ok "hypothesis confirmed"
+[[ $RESULT_C == reproduced* && $RESULT_HINT == "event names the cause" && $RESULT_D == "mounted OK" && $RESULT_E == "mounted OK" ]] \
+  || fail "expectations not met (see summary)"
+ok "all expectations met"
