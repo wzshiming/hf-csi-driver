@@ -259,6 +259,10 @@ pod. If multiple volumes set the same resource attribute with different
 values, the first volume (in `pod.spec.volumes` order) wins; invalid quantity
 strings are logged and ignored so a typo never blocks pod admission.
 
+### Mount pod network
+
+With `mountMode: mountpod` the FUSE daemon runs in a dedicated pod that uses the **node's network** by default (`hfMount.hostNetwork: true`), while the injected sidecar uses the workload pod's network. `hf-mount` contacts the Hub before it mounts, so on nodes whose host network cannot reach the Hub (egress allowed only from the pod network, a proxy configured only for pods) the volume fails with `FailedMount … FUSE mount did not appear … readiness wait timed out` even though sidecar mode works. The event quotes the mount pod's last log line, which names the request that failed. Set `hfMount.hostNetwork: false` to run mount pods on the pod network, or point `hubEndpoint` at an endpoint the node can reach.
+
 ## Mount options
 
 PV `mountOptions` are forwarded as CLI flags to hf-mount-fuse. For example:
