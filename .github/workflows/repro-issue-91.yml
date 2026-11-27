@@ -1,0 +1,44 @@
+name: Repro issue 91
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["claude/**"]
+
+permissions: {}
+
+jobs:
+  repro:
+    permissions:
+      contents: read
+    name: mountpod vs sidecar with host network blocked
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      KUBERNETES_SERVICE_HOST: ""
+      CLUSTER_NAME: issue-91
+      DRIVER_IMAGE: hf-csi-driver:test
+      HF_MOUNT_IMAGE: ghcr.io/huggingface/hf-mount-fuse:v0.13.6
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      - name: Install kind
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -fsSL -o "$HOME/bin/kind" https://kind.sigs.k8s.io/dl/v0.27.0/kind-linux-amd64
+          chmod +x "$HOME/bin/kind"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Setup cluster (webhook enabled, both modes available)
+        run: test/e2e/setup-cluster.sh sidecar
+
+      - name: Experiment
+        run: test/e2e/repro-issue-91.sh
+
+      - name: Debug on failure
+        if: failure()
+        run: |
+          kubectl get pods -A -o wide
+          kubectl get events --sort-by='.lastTimestamp' | tail -80
+          kubectl logs -l app=hf-csi-node -c hf-csi-plugin --tail=300
